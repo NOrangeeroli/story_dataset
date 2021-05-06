@@ -1,4 +1,4 @@
-from transformers import BertForSequenceClassification
+from transformers import GPT2ForSequenceClassification, GPT2Config
 from torch.utils.data import DataLoader
 import torch
 from tools import start_debugger_on_exception
@@ -11,7 +11,12 @@ from torch.utils.data import DataLoader
 device = torch.device('cuda:6') 
 train_dataloader = DataLoader(train_dataset, batch_size=11, shuffle=True)
 val_dataloader = DataLoader(val_dataset, batch_size=11, shuffle=True)
-model = BertForSequenceClassification.from_pretrained('bert-base-chinese')
+from transformers import BertTokenizer
+tokenizer = BertTokenizer.from_pretrained('uer/gpt2-chinese-cluecorpussmall')
+model_config = GPT2Config.from_pretrained(pretrained_model_name_or_path='uer/gpt2-chinese-cluecorpussmall', num_labels=2)
+model =GPT2ForSequenceClassification.from_pretrained('uer/gpt2-chinese-cluecorpussmall')
+model.resize_token_embeddings(len(tokenizer))
+model.config.pad_token_id = model.config.eos_token_id
 model.to(device)  
 model.train()
 model.to(device)  
@@ -24,8 +29,6 @@ optimizer_grouped_parameters = [
             ]
 epochs = 40
 optimizer = AdamW(optimizer_grouped_parameters, lr=1e-5)
-from transformers import BertTokenizer
-tokenizer = BertTokenizer.from_pretrained('bert-base-chinese')
 from transformers import get_linear_schedule_with_warmup
 total_steps = len(train_dataloader) * epochs
 scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=0,num_training_steps = total_steps)
@@ -49,8 +52,8 @@ def step(model,dataloader,tokenizer,optimizer,if_train=True):
         #import pdb;pdb.set_trace()
 
         loss = outputs[0]
-        
-        
+
+
         losses.append(loss.item())
         if if_train:
             loss.backward()
