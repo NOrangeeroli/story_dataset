@@ -53,8 +53,8 @@ logger = logging.getLogger(__name__)
 
 class SummarizationModule(BaseTransformer):
     mode = "summarization"
-    loss_names = ["loss", "lm_loss", "ti_loss",'acc']
-    metric_names = ['rouge2'] #ROUGE_KEYS
+    loss_names = ["loss",'acc']
+    metric_names = [] #ROUGE_KEYS
     default_val_metric = "loss"
 
     def __init__(self, hparams, **kwargs):
@@ -181,7 +181,9 @@ class SummarizationModule(BaseTransformer):
             assert lm_logits.shape[-1] == self.vocab_size
 
             loss = ce_loss_fct(lm_logits.view(-1, lm_logits.shape[-1]), tgt_ids.view(-1))
+            
             p_tensor = torch.all(torch.max(lm_logits,2)[1]==tgt_ids,1)
+            import pdb;pdb.set_trace()
             acc = p_tensor.sum()/sum(p_tensor.shape)
             lm_loss, ti_loss = loss + 0., loss + 0.
 
@@ -220,6 +222,70 @@ class SummarizationModule(BaseTransformer):
 
         return (loss, lm_loss, ti_loss, acc)
 
+    def _valid_step(self, batch: dict) -> dict:
+        pad_token_id = self.tokenizer.pad_token_id
+        src_ids, src_mask = batch["input_ids"], batch["attention_mask"]
+        
+        tgt_ids = batch["labels"]
+        if isinstance(self.model, T5ForConditionalGeneration):
+            decoder_input_ids = self.model._shift_right(tgt_ids)
+        else:
+            decoder_input_ids = shift_tokens_right(tgt_ids, pad_token_id)
+
+
+        if not self.already_saved_batch:  # This would be slightly better if it only happened on rank zero
+            batch["decoder_input_ids"] = decoder_input_ids
+            self.save_readable_batch(batch)
+
+        outputs = self(src_ids, attention_mask=src_mask, decoder_input_ids=decoder_input_ids, use_cache=False)
+        lm_logits = outputs["logits"]
+
+        if self.hparams.label_smoothing == 0:
+            # Same behavior as modeling_bart.py, besides ignoring pad_token_id
+            ce_loss_fct = torch.nn.CrossEntropyLoss(ignore_index=pad_token_id)
+            assert lm_logits.shape[-1] == self.vocab_size
+
+            loss = ce_loss_fct(lm_logits.view(-1, lm_logits.shape[-1]), tgt_ids.view(-1))
+            p_tensor = torch.all(torch.max(lm_logits,2)[1]==tgt_ids,1)
+            acc = p_tensor.sum()/sum(p_tensor.shape)
+            lm_loss, ti_loss = loss + 0., loss + 0.
+
+
+            # ce_loss_fct = torch.nn.CrossEntropyLoss(ignore_index=pad_token_id, reduction="none")
+            # assert lm_logits.shape[-1] == self.vocab_size
+            # batch_loss = ce_loss_fct(lm_logits.view(-1, lm_logits.shape[-1]), tgt_ids.view(-1))
+
+            # lm_mask = (batch["loss_labels"].eq(0).to(torch.float)[:, None] * torch.ones_like(tgt_ids) * (1 - tgt_ids.eq(pad_token_id).to(torch.float))).view(-1)
+            # ti_mask = (batch["loss_labels"].eq(1).to(torch.float)[:, None] * torch.ones_like(tgt_ids) * (1 - tgt_ids.eq(pad_token_id).to(torch.float))).view(-1)
+
+            # lm_loss = torch.sum(batch_loss * lm_mask) / (torch.sum(lm_mask) + 1e-20)
+            # ti_loss = torch.sum(batch_loss * ti_mask) / (torch.sum(ti_mask) + 1e-20)
+            # loss = torch.sum(batch_loss * (lm_mask + ti_mask)) / (torch.sum(lm_mask + ti_mask) + 1e-20)
+        else:
+            lprobs = torch.nn.functional.log_softmax(lm_logits, dim=-1)
+            loss, nll_loss = label_smoothed_nll_loss(
+                lprobs, tgt_ids, self.hparams.label_smoothing, ignore_index=pad_token_id
+            )
+            lm_loss, ti_loss = loss + 0., ti_loss + 0.
+
+
+        # print(src_ids)
+        # print(batch.keys())
+        # print(batch["ids"].cpu().numpy())
+        # print(batch["loss_labels"].cpu().numpy())
+        # for i in range(3):
+        #     print(self.tokenizer.convert_ids_to_tokens(batch["input_ids"].cpu().numpy()[i]))
+        #     print(self.tokenizer.convert_ids_to_tokens(decoder_input_ids.cpu().numpy()[i]))
+        #     print(self.tokenizer.convert_ids_to_tokens(batch["labels"].cpu().numpy()[i]))
+        #     # print(self.tokenizer.unk_token, self.tokenizer.pad_token, self.tokenizer.eos_token, self.tokenizer.bos_token, self.tokenizer.cls_token, self.tokenizer.mask_token)
+        #     print("="*10)
+        # print("="*30)
+        # print(loss, lm_loss, ti_loss)
+        # exit()
+
+        return {'loss':loss, 'acc': acc}
+
+ 
     @property
     def pad(self) -> int:
         return self.tokenizer.pad_token_id
@@ -236,7 +302,8 @@ class SummarizationModule(BaseTransformer):
         return {"loss": loss_tensors[0], "lm_loss": loss_tensors[1], "ti_loss": loss_tensors[2],"acc": loss_tensors[2], "log": logs}
 
     def validation_step(self, batch, batch_idx) -> Dict:
-        return self._generative_step(batch)
+        #return {}
+        return self._valid_step(batch)
 
     def validation_epoch_end(self, outputs, prefix="val") -> Dict:
         self.step_count += 1
@@ -244,7 +311,7 @@ class SummarizationModule(BaseTransformer):
         loss = losses["loss"]
         acc = losses['acc']
         generative_metrics = {
-            k: np.array([x[k] for x in outputs]).mean() for k in self.metric_names + ["gen_time", "gen_len"]
+            k: np.array([x[k] for x in outputs]).mean() for k in self.metric_names 
         }
         metric_val = (
             generative_metrics[self.val_metric] if self.val_metric in generative_metrics else losses[self.val_metric]
@@ -255,12 +322,10 @@ class SummarizationModule(BaseTransformer):
         all_metrics = {f"{prefix}_avg_{k}": x for k, x in losses.items()}
         all_metrics["step_count"] = self.step_count
         self.metrics[prefix].append(all_metrics)  # callback writes this to self.metrics_save_path
-        preds = flatten_list([x["preds"] for x in outputs])
         self.log(f"{prefix}_loss",loss)
         self.log(f"{prefix}_acc",acc)
         return {
             "log": all_metrics,
-            "preds": preds,
             f"{prefix}_loss": loss,
             f"{prefix}_acc": acc,
             f"{prefix}_{self.val_metric}": metric_tensor,
@@ -364,7 +429,7 @@ class SummarizationModule(BaseTransformer):
         add_generic_args(parser, root_dir)
         parser.add_argument(
             "--max_source_length",
-            default=512,
+            default=1024,
             type=int,
             help="The maximum total input sequence length after tokenization. Sequences longer "
             "than this will be truncated, sequences shorter will be padded.",
@@ -398,7 +463,7 @@ class SummarizationModule(BaseTransformer):
         parser.add_argument("--max_tokens_per_batch", type=int, default=None)
         parser.add_argument("--logger_name", type=str, choices=["default", "wandb", "wandb_shared"], default="default")
         parser.add_argument("--n_train", type=int, default=-1, required=False, help="# examples. -1 means use all.")
-        parser.add_argument("--n_val", type=int, default=500, required=False, help="# examples. -1 means use all.")
+        parser.add_argument("--n_val", type=int, default=-1, required=False, help="# examples. -1 means use all.")
         parser.add_argument("--n_test", type=int, default=-1, required=False, help="# examples. -1 means use all.")
         parser.add_argument(
             "--task", type=str, default="summarization", required=False, help="# examples. -1 means use all."
@@ -425,7 +490,7 @@ class SummarizationModule(BaseTransformer):
 class TranslationModule(SummarizationModule):
     mode = "translation"
     loss_names = ["loss"]
-    metric_names = ["bleu"]
+    metric_names = []
     default_val_metric = "bleu"
 
     def __init__(self, hparams, **kwargs):
@@ -503,6 +568,5 @@ if __name__ == "__main__":
     parser = SummarizationModule.add_model_specific_args(parser, os.getcwd())
 
     args = parser.parse_args()
-
     # args.num_workers = 0
     main(args)
