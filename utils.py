@@ -139,6 +139,11 @@ def split_by(string,marks):
 def split_by_fullstop(string):
     
     return split_by(string,ENDMARK)
+def split_by_pair(string,left,right):
+    s=string.replace(left,SPLITZEICH+left)
+    s=s.replace(right,right+SPLITZEICH)
+    s = s.split(SPLITZEICH)
+    return s
 def split_by_quote(string):
     s=string.replace('“',SPLITZEICH+'“')
     s=s.replace('”','”'+SPLITZEICH)
@@ -191,4 +196,6 @@ def count_clauses(string):
     return len(split_by_fullstop(string))   
 def count_sentences(string):
     return len(split_by(string,ENDMARK)) 
-
+def get_word_len(s):
+    import jieba
+    return len(list(jieba.cut(s, cut_all=False)))

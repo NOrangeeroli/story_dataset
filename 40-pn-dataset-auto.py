@@ -33,6 +33,7 @@ def gen_samples():
     for i,(c, ref) in enumerate(zip(cands, refs)):
         print(i,'th candidate...')
         cand = [c]*len(ref)
+        import pdb;pdb.set_trace()
         P, R, F1 = scorer.score(cand, ref)
         bestmatch.append(int(torch.argmax(R)))
     negative_samples = [(x,y[z],False) for x,y,z in zip(stories_context,refs,bestmatch)]
